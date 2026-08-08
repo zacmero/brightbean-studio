@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 import uuid
 from datetime import timedelta
@@ -19,6 +20,11 @@ from .models import MediaAsset, MediaAssetVersion, MediaFolder
 from .validators import validate_file
 
 logger = logging.getLogger(__name__)
+
+
+def _video_limit_for_workspace(workspace):
+    unlimited = set(getattr(settings, "MEDIA_LIBRARY_UNLIMITED_VIDEO_WORKSPACE_IDS", ()))
+    return sys.maxsize if workspace and str(workspace.id) in unlimited else None
 
 
 class ProtectedAssetError(Exception):
@@ -84,7 +90,10 @@ def create_asset(
     from .quotas import enforce_storage_quota
     from .validators import sniff_mime  # local import to avoid validator import cycle on the test path
 
-    file_type, errors = validate_file(uploaded_file)
+    file_type, errors = validate_file(
+        uploaded_file,
+        max_video_size=_video_limit_for_workspace(workspace),
+    )
     if errors:
         raise ValidationError(errors)
 
@@ -215,7 +224,10 @@ def inspect_uploaded_object(pending) -> dict:
         # Reuse the shared validate_file chokepoint (allowlist + per-type cap) so
         # the presigned path can't drift from REST/base64 uploads. ``.size`` is the
         # real HEAD-derived size, so the cap is enforced on the actual object.
-        file_type, errors = validate_file(_HeadProbe(head, size))
+        file_type, errors = validate_file(
+            _HeadProbe(head, size),
+            max_video_size=_video_limit_for_workspace(pending.workspace),
+        )
         if errors:
             raise ValidationError(errors)
         mime = sniff_mime(io.BytesIO(head)) or ""

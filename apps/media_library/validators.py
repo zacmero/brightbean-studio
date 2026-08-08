@@ -104,7 +104,7 @@ def sniff_mime(file_obj):
     return None
 
 
-def validate_file(uploaded_file):
+def validate_file(uploaded_file, *, max_video_size=None):
     """Validate an uploaded file. Returns (file_type, errors).
 
     Trusts the sniffed magic bytes, not the client-supplied Content-Type. The
@@ -125,7 +125,11 @@ def validate_file(uploaded_file):
         errors.append("Unsupported file type.")
         return None, errors
 
-    max_size = MAX_FILE_SIZES.get(file_type, 20 * 1024 * 1024)
+    max_size = (
+        max_video_size
+        if file_type == "video" and max_video_size is not None
+        else MAX_FILE_SIZES.get(file_type, 20 * 1024 * 1024)
+    )
     if uploaded_file.size > max_size:
         max_mb = max_size / (1024 * 1024)
         errors.append(f"File too large. Maximum size for {file_type} files is {max_mb:.0f}MB.")
