@@ -181,6 +181,7 @@ def create(request, payload: CreatePostRequest):
             "title": ov.title,
             "caption": ov.caption,
             "first_comment": ov.first_comment,
+            "thumbnail_asset_id": ov.thumbnail_asset_id,
         }
 
     # ---- Atomic claim-first idempotency. Three early-out branches

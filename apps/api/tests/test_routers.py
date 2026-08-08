@@ -21,11 +21,13 @@ import json
 from datetime import timedelta
 
 import pytest
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 from django.utils import timezone
 
 from apps.api_keys import services
 from apps.composer.models import PlatformPost, Post
+from apps.media_library.models import MediaAsset
 from apps.members.models import PERMISSION_KEYS, OrgMembership, WorkspaceMembership
 
 # ---------------------------------------------------------------------------
@@ -203,6 +205,39 @@ class TestCreatePost:
         # DB-side asserts.
         assert Post.objects.count() == 1
         assert PlatformPost.objects.filter(status="draft").count() == 1
+
+    def test_create_post_with_youtube_thumbnail(self, client_with_token, social_account):
+        workspace = social_account.workspace
+        thumbnail = MediaAsset.objects.create(
+            organization=workspace.organization,
+            workspace=workspace,
+            file=SimpleUploadedFile("thumb.png", b"png"),
+            filename="thumb.png",
+            media_type="image",
+            mime_type="image/png",
+            file_size=3,
+        )
+        response = client_with_token.post(
+            "/api/v1/posts/",
+            data=json.dumps(
+                {
+                    "social_account_id": str(social_account.id),
+                    "caption": "Custom thumbnail.",
+                    "action": "draft",
+                    "platform_overrides": [
+                        {
+                            "social_account_id": str(social_account.id),
+                            "thumbnail_asset_id": str(thumbnail.id),
+                        }
+                    ],
+                }
+            ),
+            content_type="application/json",
+        )
+        assert response.status_code == 201, response.content
+        assert PlatformPost.objects.get().platform_extra == {
+            "thumbnail_asset_id": str(thumbnail.id)
+        }
 
     def test_create_draft_with_internal_notes(self, client_with_token, social_account):
         r = client_with_token.post(

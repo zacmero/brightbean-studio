@@ -173,6 +173,19 @@ def create_post(
             raise ValueError(f"Media asset(s) not found in workspace {workspace.id}: {missing}")
 
     override = (platform_overrides or {}).get(social_account.id) or {}
+    thumbnail_asset_id = override.get("thumbnail_asset_id")
+    platform_extra = {}
+    if thumbnail_asset_id:
+        thumbnail = MediaAsset.objects.filter(
+            id=thumbnail_asset_id,
+            workspace=workspace,
+            media_type="image",
+        ).first()
+        if not thumbnail:
+            raise ValueError(
+                f"Thumbnail asset {thumbnail_asset_id} is not an image in workspace {workspace.id}."
+            )
+        platform_extra["thumbnail_asset_id"] = str(thumbnail.id)
 
     with transaction.atomic():
         post = Post.objects.create(
@@ -200,6 +213,7 @@ def create_post(
             platform_specific_title=override.get("title"),
             platform_specific_caption=override.get("caption"),
             platform_specific_first_comment=override.get("first_comment"),
+            platform_extra=platform_extra,
         )
         for position, (_mid, u) in enumerate(resolved):
             # ``u`` is validated non-None and present in ``asset_map`` above

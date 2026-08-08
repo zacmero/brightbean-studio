@@ -136,6 +136,10 @@ class PlatformOverride(Schema):
     title: str | None = Field(None, max_length=255)
     caption: str | None = Field(None, max_length=10_000)
     first_comment: str | None = Field(None, max_length=10_000)
+    thumbnail_asset_id: uuid.UUID | None = Field(
+        None,
+        description="Image MediaAsset used as the YouTube custom thumbnail.",
+    )
 
 
 class CreatePostRequest(Schema):
