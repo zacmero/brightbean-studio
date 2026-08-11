@@ -4,10 +4,36 @@ from unittest.mock import MagicMock, call
 from providers.exceptions import APIError
 from providers.instagram import InstagramProvider
 from providers.instagram_login import InstagramLoginProvider
+from providers.types import PostType, PublishContent
 
 
 def _resp(data):
     return MagicMock(json=MagicMock(return_value=data))
+
+
+def test_instagram_login_video_fallback_publishes_reel():
+    provider = InstagramLoginProvider({"client_id": "id", "client_secret": "secret"})
+    provider._create_container = MagicMock(return_value="container")
+    provider._wait_for_container = MagicMock()
+    provider._publish_container = MagicMock()
+
+    provider.publish_post(
+        "token",
+        PublishContent(
+            text="Caption",
+            media_urls=["https://example.com/video.mp4"],
+            post_type=PostType.VIDEO,
+        ),
+    )
+
+    provider._create_container.assert_called_once_with(
+        "token",
+        {
+            "caption": "Caption",
+            "media_type": "REELS",
+            "video_url": "https://example.com/video.mp4",
+        },
+    )
 
 
 def test_get_user_pages_returns_linked_instagram_business_accounts():
