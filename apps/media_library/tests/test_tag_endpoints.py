@@ -96,6 +96,23 @@ class AssetTagEndpointTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("must be a string", response.json()["error"])
 
+    def test_pending_htmx_poll_keeps_card_in_place(self):
+        self.asset.processing_status = MediaAsset.ProcessingStatus.PENDING
+        self.asset.save(update_fields=["processing_status"])
+        url = reverse(
+            "media_library:processing_status",
+            kwargs={"workspace_id": self.workspace.id, "asset_id": self.asset.id},
+        )
+
+        response = self.client.get(
+            url,
+            HTTP_HX_REQUEST="true",
+            HTTP_X_FORWARDED_PROTO="https",
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.content, b"")
+
     def test_unauthenticated_request_redirects(self):
         self.client.logout()
         response = self._post_json(["alpha"])
