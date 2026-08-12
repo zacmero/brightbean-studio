@@ -390,6 +390,20 @@ class TestList:
 
 
 @pytest.mark.django_db
+@pytest.mark.django_db
+class TestDelete:
+    def test_deletes_workspace_asset(self, client_with_token):
+        from apps.media_library.models import MediaAsset
+
+        media_id = client_with_token.post(
+            "/api/v1/media/", data={"file": _png(name="delete-me.png")}
+        ).json()["id"]
+        response = client_with_token.delete(f"/api/v1/media/{media_id}")
+
+        assert response.status_code == 204, response.content
+        assert not MediaAsset.objects.filter(id=media_id).exists()
+
+
 class TestMcpParity:
     def _mcp(self, client, name, args):
         r = client.post(

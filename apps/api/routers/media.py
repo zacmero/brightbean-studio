@@ -37,7 +37,7 @@ from apps.api.middleware import (
 )
 from apps.api.schemas import MediaAssetListResponse, MediaAssetResponse
 from apps.media_library.models import MediaAsset
-from apps.media_library.services import create_asset
+from apps.media_library.services import ProtectedAssetError, create_asset, delete_asset
 
 router = Router(tags=["media"])
 
@@ -211,6 +211,19 @@ def retrieve(request, media_id: uuid.UUID):
     asset = get_object_or_404(qs, id=media_id)
     log_audit_entry(request, action="media.read.200", target_id=asset.id, status_code=200)
     return MediaAssetResponse.from_asset(asset, last_used_at=getattr(asset, "last_used_at", None))
+
+
+@router.delete("/{media_id}", response={204: None}, summary="Delete a workspace media asset")
+def delete_media(request, media_id: uuid.UUID):
+    enforce_http_rate_limits(request, is_write=True)
+    _require_perm(request, "delete_media")
+    asset = get_object_or_404(MediaAsset.objects.for_workspace(request.workspace.id), id=media_id)
+    try:
+        delete_asset(asset)
+    except ProtectedAssetError as exc:
+        raise HttpError(409, "Media is referenced by a scheduled or publishing post.") from exc
+    log_audit_entry(request, action="media.delete.204", target_id=media_id, status_code=204)
+    return 204, None
 
 
 # ---------------------------------------------------------------------------
