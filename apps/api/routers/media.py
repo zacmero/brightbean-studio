@@ -123,6 +123,11 @@ def upload(
     except ValueError as exc:
         raise HttpError(422, str(exc)) from exc
     if disposition == "replay":
+        from apps.media_library.storage_archive import hydrate_asset
+
+        if isinstance(replay_body, dict) and replay_body.get("id"):
+            existing = get_object_or_404(_visible_assets_qs(request), id=replay_body["id"])
+            hydrate_asset(existing)
         return replay_status, replay_body
     if disposition == "in_flight":
         raise HttpError(
@@ -211,6 +216,17 @@ def retrieve(request, media_id: uuid.UUID):
     asset = get_object_or_404(qs, id=media_id)
     log_audit_entry(request, action="media.read.200", target_id=asset.id, status_code=200)
     return MediaAssetResponse.from_asset(asset, last_used_at=getattr(asset, "last_used_at", None))
+
+
+@router.post("/{media_id}/hydrate", response=MediaAssetResponse, summary="Restore verified original bytes for explicit reuse")
+def hydrate(request, media_id: uuid.UUID):
+    enforce_http_rate_limits(request, is_write=True)
+    asset = get_object_or_404(_visible_assets_qs(request), id=media_id)
+    from apps.media_library.storage_archive import hydrate_asset
+
+    asset = hydrate_asset(asset)
+    log_audit_entry(request, action="media.hydrate.200", target_id=asset.id, status_code=200)
+    return MediaAssetResponse.from_asset(asset)
 
 
 @router.delete("/{media_id}", response={204: None}, summary="Delete a workspace media asset")

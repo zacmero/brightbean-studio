@@ -233,6 +233,8 @@ def asset_detail(request, workspace_id, asset_id):
         pk=asset_id,
     )
 
+    from .storage_archive import hydrate_asset
+    asset = hydrate_asset(asset)
     versions = asset.versions.all()[:10]
 
     context = {
@@ -501,6 +503,8 @@ def asset_download(request, workspace_id, asset_id):
         pk=asset_id,
     )
 
+    from .storage_archive import hydrate_asset
+    asset = hydrate_asset(asset)
     storage_backend = getattr(settings, "STORAGE_BACKEND", "local")
     if storage_backend == "s3":
         # For S3, redirect to a signed URL
@@ -895,6 +899,8 @@ def shared_asset_detail(request, asset_id):
         pk=asset_id,
     )
 
+    from .storage_archive import hydrate_asset
+    asset = hydrate_asset(asset)
     versions = asset.versions.all()[:10]
     is_admin = request.org_membership and request.org_membership.org_role in ("owner", "admin")
 
@@ -1091,6 +1097,8 @@ def shared_asset_download(request, asset_id):
         raise Http404
     asset = get_object_or_404(MediaAsset.objects.shared_only(org.id), pk=asset_id)
 
+    from .storage_archive import hydrate_asset
+    asset = hydrate_asset(asset)
     storage_backend = getattr(settings, "STORAGE_BACKEND", "local")
     if storage_backend == "s3":
         return redirect(asset.file.url)

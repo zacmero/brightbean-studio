@@ -315,6 +315,9 @@ class PublishEngine:
         PublishContent payload, and calls provider.publish_post().
         Returns: {"success": bool, "platform_post_id": str, ...}
         """
+        from apps.media_library.models import MediaAsset
+        from apps.media_library.storage_archive import hydrate_asset
+
         account = platform_post.social_account
         platform = account.platform
 
@@ -353,7 +356,7 @@ class PublishEngine:
         app_url = getattr(settings, "APP_URL", "").rstrip("/")
         try:
             for pm in attachments:
-                asset = pm.media_asset
+                asset = hydrate_asset(pm.media_asset)
                 if not asset.file:
                     continue
                 # Track the first media type for post type detection
@@ -409,11 +412,15 @@ class PublishEngine:
             # need to upload a custom thumbnail (YouTube).
             thumb_asset_id = extra.pop("thumbnail_asset_id", None)
             if thumb_asset_id:
-                from apps.media_library.models import MediaAsset
-
                 try:
-                    thumb_asset = MediaAsset.objects.get(id=thumb_asset_id)
+                    thumb_asset = hydrate_asset(MediaAsset.objects.for_workspace_with_shared(
+                        workspace_id=platform_post.post.workspace_id,
+                        organization_id=platform_post.post.workspace.organization_id,
+                    ).get(id=thumb_asset_id))
                     if thumb_asset.file:
+                        if platform in ("instagram", "instagram_login"):
+                            cover_url = thumb_asset.file.url
+                            extra["cover_url"] = f"{app_url}{cover_url}" if cover_url.startswith("/") else cover_url
                         suffix = os.path.splitext(thumb_asset.filename)[1] or ".jpg"
                         tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)  # noqa: SIM115
                         temp_files.append(tmp.name)
@@ -423,13 +430,16 @@ class PublishEngine:
                         tmp.close()
                         extra["thumbnail_file"] = tmp.name
                 except MediaAsset.DoesNotExist:
-                    logger.warning("Thumbnail asset %s not found", thumb_asset_id)
+                    raise ValueError("Thumbnail is missing or outside the post workspace") from None
 
             # Resolve cover_image_asset_id → temp file (Pinterest video pins)
             cover_asset_id = extra.pop("cover_image_asset_id", None)
             if cover_asset_id:
                 try:
-                    cover_asset = MediaAsset.objects.get(id=cover_asset_id)
+                    cover_asset = hydrate_asset(MediaAsset.objects.for_workspace_with_shared(
+                        workspace_id=platform_post.post.workspace_id,
+                        organization_id=platform_post.post.workspace.organization_id,
+                    ).get(id=cover_asset_id))
                     if cover_asset.file:
                         suffix = os.path.splitext(cover_asset.filename)[1] or ".jpg"
                         tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)  # noqa: SIM115
@@ -440,7 +450,7 @@ class PublishEngine:
                         tmp.close()
                         extra["cover_image_file"] = tmp.name
                 except MediaAsset.DoesNotExist:
-                    logger.warning("Cover image asset %s not found", cover_asset_id)
+                    raise ValueError("Cover image is missing or outside the post workspace") from None
 
             post_type = self._resolve_post_type(
                 platform=platform,

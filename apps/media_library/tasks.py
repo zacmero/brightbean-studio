@@ -31,6 +31,8 @@ def process_media_asset(asset_id):
     asset.save(update_fields=["processing_status"])
 
     try:
+        from .storage_archive import hydrate_asset
+        asset = hydrate_asset(asset)
         if asset.media_type in (MediaAsset.MediaType.IMAGE, MediaAsset.MediaType.GIF):
             _process_image(asset)
         elif asset.media_type == MediaAsset.MediaType.VIDEO:
@@ -87,6 +89,8 @@ def process_image_edit(version_id, operations):
         return
 
     try:
+        from .storage_archive import hydrate_asset
+        version.media_asset = hydrate_asset(version.media_asset)
         edited_file, (width, height) = apply_image_edits(version.media_asset.file, operations)
 
         version.file.save(f"edited_{version.id}.jpg", edited_file, save=False)
@@ -122,6 +126,8 @@ def process_video_trim(version_id, start_seconds, end_seconds):
     asset = version.media_asset
 
     try:
+        from .storage_archive import hydrate_asset
+        asset = hydrate_asset(asset)
         with tempfile.NamedTemporaryFile(suffix=f".{asset.file_extension}", delete=False) as tmp_in:
             for chunk in asset.file.chunks():
                 tmp_in.write(chunk)

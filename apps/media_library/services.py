@@ -32,7 +32,7 @@ class ProtectedAssetError(Exception):
 
     def __init__(self, referencing_posts=None):
         self.referencing_posts = referencing_posts or []
-        super().__init__("Asset is referenced by scheduled posts.")
+        super().__init__("Asset is referenced by protected content or retained archive metadata.")
 
 
 def check_folder_depth(parent_folder):
@@ -271,6 +271,8 @@ def register_uploaded_asset(
 
 
 def create_version(asset, file, change_description, created_by):
+    from .storage_archive import hydrate_asset
+    asset = hydrate_asset(asset)
     """Create a new version of an asset."""
     latest = asset.versions.order_by("-version_number").first()
     next_version = (latest.version_number + 1) if latest else 1
@@ -321,6 +323,9 @@ def restore_version(asset, version, restored_by):
 
 def delete_asset(asset):
     """Delete a media asset, checking for post references first."""
+    # Archive identity must survive original-file retirement and orphan cleanup.
+    if "_archive" in (asset.processed_variants or {}):
+        raise ProtectedAssetError()
     # Check for post references (placeholder for when posts app exists)
     # When the composer/posts app is built, this will query:
     # PostMedia.objects.filter(media_asset=asset, post__status="scheduled")
@@ -344,24 +349,68 @@ def delete_asset(asset):
     asset.delete()
 
 
+def _json_references_asset(payload, asset):
+    """Include nested cover/media JSON and stored file keys, not only attachment FKs."""
+    from urllib.parse import unquote, urlsplit
+
+    if isinstance(payload, dict):
+        return any(_json_references_asset(value, asset) for value in payload.values())
+    if isinstance(payload, (list, tuple)):
+        return any(_json_references_asset(value, asset) for value in payload)
+    if not isinstance(payload, str):
+        return False
+    if payload.lower() == str(asset.pk).lower():
+        return True
+    keys = [field.name for field in (asset.file, asset.thumbnail) if field and field.name]
+    try:
+        path = unquote(urlsplit(payload).path)
+    except ValueError:
+        path = payload
+    return any(payload == key or path.endswith("/" + key) for key in keys)
+
+
+def asset_referencing_posts(asset):
+    """All referencing posts, including historical/UNKNOWN and JSON cover references."""
+    from apps.composer.models import PlatformPost, Post, PostMedia, PostVersion
+
+    ids = set(PostMedia.objects.filter(media_asset=asset).values_list("post_id", flat=True))
+    # ponytail: linear JSON scan; index references if this small retention inventory grows.
+    for row in PlatformPost.objects.only("post_id", "platform_extra", "platform_specific_media").iterator():
+        if _json_references_asset(row.platform_extra, asset) or _json_references_asset(row.platform_specific_media, asset):
+            ids.add(row.post_id)
+    for row in PostMedia.objects.only("post_id", "platform_overrides").iterator():
+        if _json_references_asset(row.platform_overrides, asset):
+            ids.add(row.post_id)
+    for row in PostVersion.objects.only("post_id", "snapshot").iterator():
+        if _json_references_asset(row.snapshot, asset):
+            ids.add(row.post_id)
+    return list(Post.objects.filter(pk__in=ids).prefetch_related("platform_posts"))
+
+
+def asset_has_non_post_references(asset):
+    """Ideas and reusable templates are never authorized by a confirmed-post allowlist."""
+    from apps.composer.models import Idea, IdeaMedia, PostTemplate
+    from .models import PendingUpload
+
+    if (MediaAsset.objects.filter(file=asset.file.name).exclude(pk=asset.pk).exists()
+            or MediaAssetVersion.objects.filter(file=asset.file.name).exists()
+            or PendingUpload.objects.filter(storage_key=asset.file.name).exists()):
+        return True
+
+    if Idea.objects.filter(media_asset=asset).exists() or IdeaMedia.objects.filter(media_asset=asset).exists():
+        return True
+    return any(_json_references_asset(row.template_data, asset) for row in PostTemplate.objects.only("template_data").iterator())
+
+
 def _check_post_references(asset):
-    """Check if an asset is referenced by any scheduled or publishing posts.
-
-    Returns a list of post descriptions if referenced, empty list otherwise.
-    """
-    from apps.composer.models import PostMedia
-
-    # Status now lives on PlatformPost — a Post is "in flight" if any of its
-    # children are scheduled or publishing.
-    scheduled_refs = (
-        PostMedia.objects.filter(
-            media_asset=asset,
-            post__platform_posts__status__in=("scheduled", "publishing"),
-        )
-        .select_related("post")
-        .distinct()
-    )
-    return [{"id": str(ref.post_id), "caption": (ref.post.caption or "")[:80]} for ref in scheduled_refs]
+    refs = []
+    for post in asset_referencing_posts(asset):
+        children = list(post.platform_posts.all())
+        if not children or any(child.status != "published" for child in children):
+            refs.append({"id": str(post.pk), "caption": (post.caption or "")[:80]})
+    if asset_has_non_post_references(asset):
+        refs.append({"id": str(asset.pk), "caption": "Referenced by an idea or template"})
+    return refs
 
 
 def extract_image_metadata(file_path_or_file):
