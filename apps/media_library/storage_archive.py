@@ -166,13 +166,32 @@ class RcloneRemote:
     def _run_raw(self, *args):
         config = self.scope["config"]
         try:
-            return subprocess.run(
+            result = subprocess.run(
                 ["rclone", "--config", str(config), "--tpslimit", "2", "--tpslimit-burst", "1",
                  "--transfers", "1", "--checkers", "1", "--retries", "1", "--low-level-retries", "1", *args],
                 capture_output=True, text=True, timeout=900,
             )
+            if result.returncode:
+                self._save_failure(result.returncode, result.stderr)
+            return result
         except subprocess.TimeoutExpired as error:
+            self._save_failure(None, error.stderr)
             raise ArchiveUnknown("rclone outcome unresolved") from error
+
+    def _save_failure(self, returncode, stderr):
+        # Provider diagnostics stay private; never put stderr into public errors.
+        directory = Path(_setting("STORAGE_ARCHIVE_STATE_DIR", DEFAULT_STATE)) / "diagnostics"
+        try:
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chmod(directory, 0o700)
+            descriptor, name = tempfile.mkstemp(prefix="rclone-failure-", suffix=".json", dir=directory)
+            with os.fdopen(descriptor, "w") as stream:
+                json.dump({"at": _now(), "returncode": returncode,
+                           "stderr": stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr}, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError:
+            pass  # Diagnostic failure must preserve the original provider outcome.
 
     def stat(self, remote):
         result = self._run("lsjson", remote, "--stat")
