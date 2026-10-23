@@ -1,0 +1,2 @@
+FROM brightbean-shared:scoped-archive-worker-20261013
+COPY providers/instagram.py /app/providers/instagram.py

@@ -74,6 +74,27 @@ CONTAINER_POLL_INTERVAL = 2  # seconds
 CONTAINER_POLL_MAX_ATTEMPTS = 60
 
 
+def _audio_configuration(content: PublishContent) -> dict | None:
+    """Validate Meta's audio object; the existing JSON transport encodes it."""
+    value = content.extra.get("audio_configuration")
+    if value is None:
+        return None
+    if content.post_type not in (PostType.REEL, PostType.VIDEO):
+        raise PublishError("Instagram library audio requires a Reel", platform="instagram", retryable=False)
+    if (not isinstance(value, dict) or not isinstance(value.get("audio_id"), str)
+            or not value["audio_id"].isascii() or not value["audio_id"].isdigit()
+            or set(value) - {"audio_id", "audio_volume", "video_volume"}):
+        raise PublishError("Invalid Instagram audio configuration", platform="instagram", retryable=False)
+    result = {"audio_id": value["audio_id"]}
+    for field in ("audio_volume", "video_volume"):
+        volume = value.get(field, 100)
+        if type(volume) is not int or not 1 <= volume <= 100:
+            raise PublishError("Instagram audio volumes must be integers from 1 to 100",
+                               platform="instagram", retryable=False)
+        result[field] = volume
+    return result
+
+
 class InstagramProvider(SocialProvider):
     """Instagram Graph API provider (via Facebook Graph API v25.0)."""
 
@@ -281,6 +302,7 @@ class InstagramProvider(SocialProvider):
     # ------------------------------------------------------------------
 
     def publish_post(self, access_token: str, content: PublishContent) -> PublishResult:
+        _audio_configuration(content)
         ig_user_id = content.extra.get("ig_user_id") or self._get_ig_user_id(access_token)
 
         if content.post_type == PostType.CAROUSEL:
@@ -290,6 +312,9 @@ class InstagramProvider(SocialProvider):
     def _publish_single(self, access_token: str, ig_user_id: str, content: PublishContent) -> PublishResult:
         """Publish a single image, reel, or story."""
         payload: dict = {}
+        audio = _audio_configuration(content)
+        if audio is not None:
+            payload["audio_configuration"] = audio
 
         if content.text:
             payload["caption"] = content.text
