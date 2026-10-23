@@ -324,7 +324,7 @@ def restore_version(asset, version, restored_by):
 def delete_asset(asset):
     """Delete a media asset, checking for post references first."""
     # Archive identity must survive original-file retirement and orphan cleanup.
-    if "_archive" in (asset.processed_variants or {}):
+    if any(key in (asset.processed_variants or {}) for key in ("_archive", "_local_abandonment")):
         raise ProtectedAssetError()
     # Check for post references (placeholder for when posts app exists)
     # When the composer/posts app is built, this will query:
@@ -717,7 +717,8 @@ def sweep_orphaned_media(
     referenced = _fk_referenced_asset_ids() | _json_referenced_asset_ids()
     emit(f"Referenced assets: {len(referenced)}")
 
-    orphaned_qs = MediaAsset.objects.filter(created_at__lt=cutoff).exclude(id__in=referenced)
+    orphaned_qs = (MediaAsset.objects.filter(created_at__lt=cutoff).exclude(id__in=referenced)
+                   .exclude(processed_variants__has_key="_local_abandonment"))
     orphaned_ids = list(orphaned_qs.values_list("id", flat=True))
     total = len(orphaned_ids)
     total_bytes = orphaned_qs.aggregate(total=Sum("file_size"))["total"] or 0

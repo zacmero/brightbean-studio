@@ -590,3 +590,240 @@ def eligible_originals(confirmed_posts, minimum_bytes=1, workspace_id=WORKSPACE_
                     and record.get("retired_at") and not asset.file.storage.exists(asset.file.name)):
                 continue
         yield asset
+
+
+# Operator-authorized VM abandonment is deliberately separate from Drive retirement.
+DREAD_ABANDONMENT_WORKSPACE = "d1e46e45-085e-44cf-8a85-864026633f24"
+DREAD_ABANDONMENT_ACCOUNT = "657858c9-ee7a-4b26-b2e9-966beac7c1e6"
+DREAD_ABANDONMENT_IDS = frozenset({'ae56de5a-1efb-4a5b-ae04-b87f6797bfba', '2ba53705-5195-4e30-9015-2759c6ad3d5c', 'f73f4568-7d99-498c-a33e-1618adf00c79', '1bc0f6da-f0c4-486e-afaf-4538644fcd17', '7cddd19c-ac29-47b8-ab92-a69055cdea28', '6d6804f2-e4b2-4206-8ccd-66d9da08293f', 'ed9f19db-8ee8-4cae-9e1a-b6fd72ba8db0', '8c21720f-a5eb-4d56-9916-d28c5c552321', '455bf1c4-113d-4b8b-b32f-33bb4afb2a53', '93e101f7-c677-4909-afd2-7512e4cf909e', '7fd91cfd-9816-48f4-81f9-62900123d6e4', '0348f220-8eed-4fa4-b616-a66d41d32be6', 'a64af355-24b6-4802-bd09-7464d521c73b'})
+
+
+def _abandonment_authorization(asset, authorization):
+    if (str(asset.workspace_id) != DREAD_ABANDONMENT_WORKSPACE
+            or str(asset.pk) not in DREAD_ABANDONMENT_IDS
+            or authorization.get("workspace_id") != DREAD_ABANDONMENT_WORKSPACE
+            or set(authorization.get("asset_ids", [])) != DREAD_ABANDONMENT_IDS
+            or authorization.get("operation_id") != "dread-local-abandonment-20261023"
+            or authorization.get("mode") != "LOCAL_ABANDONMENT"
+            or authorization.get("archive_prerequisite_waived") is not True
+            or authorization.get("drive_effects") is not False):
+        raise ProtectedAssetError()
+    expires = datetime.fromisoformat(authorization["expires_at"])
+    if expires.tzinfo is None or expires <= datetime.now(timezone.utc):
+        raise ProtectedAssetError()
+    probe = authorization.get("consumer_probe", {})
+    stamp = datetime.fromisoformat(probe.get("checked_at", "1970-01-01T00:00:00+00:00"))
+    all_keys = sorted(k for value in authorization["assets"].values() for k in value["keys"])
+    if (stamp.tzinfo is None or not 0 <= (datetime.now(timezone.utc) - stamp).total_seconds() <= 300
+            or probe.get("open_refs") != [] or probe.get("inaccessible_processes") != 0
+            or probe.get("keys_sha256") != hashlib.sha256(json.dumps(all_keys).encode()).hexdigest()):
+        raise ProtectedAssetError()
+    expected = authorization["assets"][str(asset.pk)]
+    keys = [key for key in [asset.file.name, asset.thumbnail.name] if key]
+    if (keys != expected["keys"] or any(PurePosixPath(k).is_absolute()
+            or ".." in PurePosixPath(k).parts for k in keys)):
+        raise ProtectedAssetError()
+    return keys
+
+
+def _abandonment_allowed(asset, authorization):
+    from django.db.models import Q
+    from apps.workspaces.models import Workspace
+    from apps.social_accounts.models import SocialAccount
+    from apps.composer.models import Post, PlatformPost
+    from background_task.models import Task
+    from .models import MediaAssetVersion, PendingUpload
+    keys = _abandonment_authorization(asset, authorization)
+    if not keys:
+        raise ProtectedAssetError()
+    if (not Workspace.objects.filter(pk=asset.workspace_id, is_archived=True).exists()
+            or not SocialAccount.objects.filter(pk=DREAD_ABANDONMENT_ACCOUNT,
+                workspace_id=asset.workspace_id, connection_status="disconnected",
+                account_platform_id="UC8EjpKjyoDeZjr3Hn1TOsdA").exists()
+            or SocialAccount.objects.filter(workspace_id=asset.workspace_id).exclude(
+                pk=DREAD_ABANDONMENT_ACCOUNT).exists()
+            or set(str(x) for x in MediaAsset.objects.filter(workspace_id=asset.workspace_id)
+                .values_list("pk", flat=True)) != DREAD_ABANDONMENT_IDS
+            or asset.processing_status != "completed" or asset_has_non_post_references(asset)):
+        raise ProtectedAssetError()
+    account = SocialAccount.objects.get(pk=DREAD_ABANDONMENT_ACCOUNT)
+    if account.oauth_access_token or account.oauth_refresh_token:
+        raise ProtectedAssetError()
+    posts = Post.objects.filter(workspace_id=asset.workspace_id)
+    if set(str(x) for x in posts.values_list("pk", flat=True)) != set(authorization["post_ids"]):
+        raise ProtectedAssetError()
+    children = PlatformPost.objects.filter(post__workspace_id=asset.workspace_id)
+    if (children.count() != 6 or children.exclude(status="published").exists()
+            or children.filter(platform_post_id="").exists()
+            or children.exclude(social_account_id=DREAD_ABANDONMENT_ACCOUNT).exists()):
+        raise ProtectedAssetError()
+    for post in asset_referencing_posts(asset):
+        if (str(post.workspace_id) != DREAD_ABANDONMENT_WORKSPACE
+                or str(post.pk) not in authorization["post_ids"]
+                or not post.platform_posts.exists()
+                or post.platform_posts.exclude(status="published").exists()):
+            raise ProtectedAssetError()
+    for key in keys:
+        if (MediaAsset.objects.exclude(pk=asset.pk).filter(Q(file=key) | Q(thumbnail=key)).exists()
+                or MediaAssetVersion.objects.filter(Q(file=key) | Q(thumbnail=key)).exists()
+                or PendingUpload.objects.filter(storage_key=key).exists()):
+            raise ProtectedAssetError()
+    # Derivative keys can occur directly in JSON without a foreign-key asset ID.
+    from types import SimpleNamespace
+    from apps.composer.models import PostMedia, PostVersion, PostTemplate
+    from .services import _json_references_asset
+    for key in keys:
+        alias = SimpleNamespace(pk=asset.pk, file=SimpleNamespace(name=key), thumbnail=SimpleNamespace(name=""))
+        for row in PlatformPost.objects.only("post_id", "platform_extra", "platform_specific_media").iterator():
+            if (_json_references_asset(row.platform_extra, alias)
+                    or _json_references_asset(row.platform_specific_media, alias)):
+                if str(row.post_id) not in authorization["post_ids"]:
+                    raise ProtectedAssetError()
+        for model, field in [(PostMedia, "platform_overrides"), (PostVersion, "snapshot")]:
+            for row in model.objects.only("post_id", field).iterator():
+                if (_json_references_asset(getattr(row, field), alias)
+                        and str(row.post_id) not in authorization["post_ids"]):
+                    raise ProtectedAssetError()
+        if any(_json_references_asset(value, alias) for value in
+                PostTemplate.objects.values_list("template_data", flat=True)):
+            raise ProtectedAssetError()
+        if any(_json_references_asset(value, alias) for value in
+                MediaAsset.objects.exclude(pk=asset.pk).values_list("processed_variants", flat=True)):
+            raise ProtectedAssetError()
+    # Unlocked/reserved jobs are dependencies too, not just currently locked jobs.
+    identities = [str(asset.pk), DREAD_ABANDONMENT_ACCOUNT, *authorization["post_ids"],
+                  *(str(x) for x in children.values_list("pk", flat=True))]
+    if any(Task.objects.filter(task_params__contains=value).exists() for value in identities):
+        raise ProtectedAssetError()
+    return keys
+
+
+def _persist_abandonment(asset, record):
+    with transaction.atomic():
+        current = MediaAsset.objects.select_for_update().get(pk=asset.pk)
+        if current.file.name != asset.file.name or current.workspace_id != asset.workspace_id:
+            raise ArchiveUnknown("abandonment asset binding changed")
+        variants = dict(current.processed_variants or {})
+        variants["_local_abandonment"] = dict(record)
+        # Already-running workers protect any _archive marker from row deletion.
+        # Explicitly NOT_ARCHIVED: this compatibility guard promises no remote copy.
+        existing = variants.get("_archive", {})
+        if existing and existing.get("kind") != "LOCAL_ABANDONMENT_GUARD":
+            raise ArchiveUnknown("existing archive identity cannot be replaced by abandonment")
+        variants["_archive"] = {"kind": "LOCAL_ABANDONMENT_GUARD",
+            "operation_id": record["operation_id"], "state": "LOCAL_ABANDONMENT",
+            "archive_state": "NOT_ARCHIVED", "restore_available": False,
+            "resident_state": "ABSENT" if record["state"] == "ABANDONED" else "UNKNOWN"}
+        current.processed_variants = variants
+        current.save(update_fields=["processed_variants", "updated_at"])
+        asset.processed_variants = variants
+
+
+def _abandonment_head(storage, key):
+    from botocore.exceptions import ClientError
+    from storages.utils import clean_name
+    args = {"Bucket": storage.bucket_name,
+            "Key": storage._normalize_name(clean_name(key))}
+    try:
+        head = storage.connection.meta.client.head_object(**args)
+    except ClientError as error:
+        if str(error.response.get("Error", {}).get("Code")) in {"404", "NoSuchKey", "NotFound"}:
+            return args, None
+        raise
+    return args, {"etag": head["ETag"], "size": head["ContentLength"]}
+
+
+def abandon_dread_local_asset(asset_or_id, authorization, *, execute=False):
+    """Retain rows/history; abandon only the frozen Dread VM keys, never Drive."""
+    if connection.in_atomic_block:
+        raise ArchiveUnknown("abandonment intent must commit before external deletion")
+    asset = _asset(asset_or_id)
+    with _locked(asset):
+        keys = _abandonment_allowed(asset, authorization)
+        storage = asset.file.storage
+        if not hasattr(storage, "bucket_name"):
+            raise ArchiveUnknown("abandonment requires native conditional S3 deletion")
+        if asset.thumbnail and (
+                getattr(asset.thumbnail.storage, "bucket_name", None) != storage.bucket_name
+                or asset.thumbnail.storage.connection.meta.client.meta.endpoint_url
+                    != storage.connection.meta.client.meta.endpoint_url):
+            raise ArchiveUnknown("thumbnail storage differs from frozen original backend")
+        client = storage.connection.meta.client
+        if "IfMatch" not in client.meta.service_model.operation_model("DeleteObject").input_shape.members:
+            raise ArchiveUnknown("conditional DeleteObject unsupported")
+        if client.get_bucket_versioning(Bucket=storage.bucket_name).get("Status") in {"Enabled", "Suspended"}:
+            raise ArchiveUnknown("versioned bucket abandonment requires explicit version authority")
+        record = dict((asset.processed_variants or {}).get("_local_abandonment", {}))
+        if record and record.get("operation_id") != authorization["operation_id"]:
+            raise ArchiveUnknown("different abandonment operation already exists")
+        record = record or {"operation_id": authorization["operation_id"], "mode": "LOCAL_ABANDONMENT",
+            "workspace_id": str(asset.workspace_id), "asset_id": str(asset.pk),
+            "archive_prerequisite_waived": True, "drive_effects": False,
+            "state": "PENDING", "created_at": _now(), "keys": {}}
+        for key in keys:
+            args, head = _abandonment_head(storage, key)
+            previous = record["keys"].get(key, {})
+            if head is None:
+                if previous.get("state") not in {"UNKNOWN", "ABSENT"} or not previous.get("sha256"):
+                    raise ArchiveUnknown("absent key lacks pre-effect abandonment identity")
+                if execute:
+                    previous.update(state="ABSENT", reconciled_at=_now())
+                    record["keys"][key] = previous
+                    _persist_abandonment(asset, record)
+                continue
+            if previous.get("state") == "ABSENT":
+                raise ArchiveUnknown("abandoned key unexpectedly reappeared")
+            uploads = client.list_multipart_uploads(Bucket=storage.bucket_name, Prefix=args["Key"])
+            if uploads.get("IsTruncated") or any(x.get("Key") == args["Key"] for x in uploads.get("Uploads", [])):
+                raise ProtectedAssetError()
+            digest = hashlib.sha256()
+            size = 0
+            with storage.open(key, "rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+                    size += len(chunk)
+            _, after = _abandonment_head(storage, key)
+            identity = {**head, "sha256": digest.hexdigest(), "storage_key": key}
+            if head != after or size != head["size"]:
+                raise ArchiveUnknown("abandonment original changed during verification")
+            if execute and authorization["assets"][str(asset.pk)].get("objects", {}).get(key) != identity:
+                raise ArchiveUnknown("execution identity differs from frozen dry-run scope")
+            if previous.get("sha256") and any(previous.get(k) != identity[k] for k in ["etag", "size", "sha256"]):
+                raise ArchiveUnknown("unresolved abandonment identity changed")
+            if not execute:
+                record["keys"][key] = {**identity, "state": "DRY_RUN"}
+                continue
+            # This transaction commits BEFORE the external effect. Never erase UNKNOWN on rollback.
+            record["state"] = "UNKNOWN"
+            record["keys"][key] = {**identity, "state": "UNKNOWN", "intent_at": _now()}
+            _persist_abandonment(asset, record)
+            with _dependency_commit(asset) as current:
+                if connection.vendor == "postgresql":
+                    from apps.workspaces.models import Workspace
+                    from apps.social_accounts.models import SocialAccount
+                    from background_task.models import Task
+                    tables = sorted(m._meta.db_table for m in (Workspace, SocialAccount, Task))
+                    with connection.cursor() as cursor:
+                        cursor.execute("LOCK TABLE " + ", ".join(connection.ops.quote_name(t) for t in tables)
+                                       + " IN SHARE ROW EXCLUSIVE MODE")
+                _abandonment_allowed(current, authorization)
+                _, final = _abandonment_head(storage, key)
+                if final is None:
+                    pass  # Previous committed intent can reconcile an already absent generation.
+                elif final != head:
+                    raise ArchiveUnknown("abandonment generation changed before deletion")
+                else:
+                    with _write_admission(storage, key) as token:
+                        url = client.generate_presigned_url("delete_object", Params=args, ExpiresIn=60)
+                        request = Request(url, method="DELETE",
+                            headers={"X-Storage-Archive-Owner": token, "If-Match": head["etag"]})
+                        with urlopen(request, timeout=60):
+                            pass
+                if _abandonment_head(storage, key)[1] is not None:
+                    raise ArchiveUnknown("abandonment deletion outcome unresolved")
+            record["keys"][key].update(state="ABSENT", retired_at=_now())
+            _persist_abandonment(asset, record)
+        if execute:
+            record.update(state="ABANDONED", completed_at=_now())
+            _persist_abandonment(asset, record)
+        return record
