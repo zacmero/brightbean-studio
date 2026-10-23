@@ -327,6 +327,8 @@ class InstagramProvider(SocialProvider):
             # sent as image_url ("The image format is not supported").
             payload["media_type"] = "REELS"
             payload["video_url"] = content.media_urls[0]
+            if content.extra.get("cover_url"):
+                payload["cover_url"] = content.extra["cover_url"]
         elif content.post_type == PostType.STORY:
             if content.media_urls and content.media_urls[0].endswith((".mp4", ".mov")):
                 payload["media_type"] = "STORIES"
